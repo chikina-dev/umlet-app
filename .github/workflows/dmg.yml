@@ -1,0 +1,54 @@
+name: Build DMG
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build app and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=build/dmg/UMLet.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp Info.plist "$app/Contents/Info.plist"
+          cp Resources/* "$app/Contents/Resources/"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${GITHUB_REF_NAME#v}" "$app/Contents/Info.plist"
+          fi
+          for arch in arm64 x86_64; do
+            xcrun swiftc -O -target "$arch-apple-macosx12.0" \
+              Sources/UMLetLauncher.swift -o "build/launcher-$arch"
+          done
+          xcrun lipo -create build/launcher-arm64 build/launcher-x86_64 \
+            -output "$app/Contents/MacOS/UMLetLauncher"
+          codesign --force --sign - "$app"
+          codesign --verify --strict "$app"
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname UMLet -srcfolder build/dmg \
+            -format UDZO -ov build/UMLet.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: build/UMLet.dmg
+          archive: false
+          if-no-files-found: error
+
+      - name: Attach DMG to release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" build/UMLet.dmg --clobber
